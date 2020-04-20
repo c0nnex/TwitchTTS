@@ -1,0 +1,9 @@
+﻿################################################################################
+# This .gitignore file was automatically created by Microsoft(R) Visual Studio.
+################################################################################
+
+/.vs/TwitchTTS
+/bin/Debug
+/obj/Debug
+/packages/NLog.4.7.0
+*.user
