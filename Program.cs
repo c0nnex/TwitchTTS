@@ -222,7 +222,7 @@ namespace TwitchTTS
             tts.Start();
             SpeakText("Twitch T T S gestartet. Möge der Saft mit Dir sein!");
 
-            Console.WriteLine("Press enter to exit....");
+            Console.WriteLine("!help for command, 'quit' to exit ...");
             string cCmd;
             while ((cCmd = Console.ReadLine()) != null)
             {
@@ -464,11 +464,14 @@ namespace TwitchTTS
 
         static void LoadConfig()
         {
-            var tmpSpeakers = FromXml<SpeakerConfigList>(File.ReadAllText(GetFilename("config/speakers.xml")));
-            SpeakerConfigurations.Clear();
-            tmpSpeakers.speakers.ForEach(s => SpeakerConfigurations[s.Name] = s);
-
-            Config = FromXml<TwitchTTSConfig>(File.ReadAllText(GetFilename("config/config.xml")));
+            if (File.Exists(GetFilename("config/speakers.xml")))
+            {
+                var tmpSpeakers = FromXml<SpeakerConfigList>(File.ReadAllText(GetFilename("config/speakers.xml")));
+                SpeakerConfigurations.Clear();
+                tmpSpeakers.speakers.ForEach(s => SpeakerConfigurations[s.Name] = s);
+            }
+            if (File.Exists(GetFilename("config/config.xml")))
+                Config = FromXml<TwitchTTSConfig>(File.ReadAllText(GetFilename("config/config.xml")));
 
             logger.Info($"Configuration loaded. {SpeakerConfigurations.Count} Speakers");
         }
