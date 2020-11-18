@@ -12,6 +12,8 @@ using System.Threading.Tasks;
 using System.Speech.Synthesis;
 using System.Xml.Serialization;
 using System.Xml;
+using System.Text.RegularExpressions;
+using System.Collections.Concurrent;
 
 namespace TwitchTTS
 {
@@ -24,7 +26,7 @@ namespace TwitchTTS
 
         internal static String ApplicationDirectory
         {
-            get { return _ApplicationDirectory ?? (_ApplicationDirectory = Path.GetDirectoryName(System.Reflection.Assembly.GetEntryAssembly().Location)); }
+            get => Environment.CurrentDirectory;//{ return _ApplicationDirectory ?? (_ApplicationDirectory = Path.GetDirectoryName(System.Reflection.Assembly.GetEntryAssembly().Location)); }
         }
         private static String _ApplicationDirectory;
 
@@ -98,15 +100,28 @@ namespace TwitchTTS
             }
         }
 
+        static VoiceConfig GetVoiceConfig(string speakerVoice)
+        {
+            var cfg = Config.VoiceConfig.FirstOrDefault(v => v.Matches(speakerVoice));
+            if (cfg == null)
+            {
+                cfg = Config.VoiceConfig.FirstOrDefault(v => v.Matches(DefaultVoice));
+            }
+            return cfg;
+        }
+
         private static void SpeakText(string text, string speakerVoice = null)
         {
             try
             {
-                if ((!String.IsNullOrEmpty(speakerVoice)) && (InstalledVoices.FirstOrDefault(iv => iv.Name.CompareNoCase(speakerVoice)) != null))
-                    speaker.SelectVoice(speakerVoice);
-                else
-                    speaker.SelectVoice(DefaultVoice);
-                speaker.Volume = GetVoiceVolume(speakerVoice);
+                if (speaker.State == SynthesizerState.Speaking)
+                {
+                    TextToSpeak.Enqueue(new TextSpeak(text, speakerVoice));
+                    return;
+                }
+                var cfg = GetVoiceConfig(speakerVoice);
+                speaker.SelectVoice(cfg.VoiceName);
+                speaker.Volume = cfg.Volume;
             }
             catch (ArgumentException aex)
             {
@@ -118,14 +133,27 @@ namespace TwitchTTS
         #endregion
 
         #region TwitchAPI
-        static bool IsSubscriber(SpeakerConfig who) => true ||  who.IsSubscriber || who.Name.CompareNoCase(Config.ChannelName);
+        static bool IsSubscriber(SpeakerConfig who) => true || who.IsSubscriber || who.Name.CompareNoCase(Config.ChannelName);
         static bool IsFollower(SpeakerConfig who) => true;
         static bool IsMod(SpeakerConfig who) => who.IsMod || who.Name.CompareNoCase(Config.ChannelName);
         #endregion
 
+        class TextSpeak
+        {
+            public string Text;
+            public string Voice;
+
+            public TextSpeak(string text, string voice)
+            {
+                Text = text;
+                Voice = voice;
+            }
+        }
+
         static Dictionary<string, SpeakerConfig> SpeakerConfigurations = new Dictionary<string, SpeakerConfig>(StringComparer.InvariantCultureIgnoreCase);
         static Dictionary<string, string> TextReplacements = new Dictionary<string, string>(StringComparer.InvariantCultureIgnoreCase);
         static Dictionary<string, Action<SpeakerConfig, string>> ChatCommands = new Dictionary<string, Action<SpeakerConfig, string>>(StringComparer.InvariantCultureIgnoreCase);
+        static ConcurrentQueue<TextSpeak> TextToSpeak = new ConcurrentQueue<TextSpeak>();
 
         static SpeechSynthesizer speaker;
         static string DefaultVoice = ""; //"IVONA 2 Hans OEM"; //"Vocalizer Expressive Markus Harpo 22kHz";
@@ -143,21 +171,31 @@ namespace TwitchTTS
 
             InstalledVoices = GetInstalledVoices();
             speaker = new SpeechSynthesizer();
-            speaker.SetOutputToDefaultAudioDevice();
+            //speaker.SetOutputToDefaultAudioDevice();
             speaker.Rate = 0;
             speaker.Volume = 100;
+            speaker.StateChanged += Speaker_StateChanged;
 
-           
             LoadConfig();
 
             if (String.IsNullOrEmpty(Config.DefaultVoice))
                 Config.DefaultVoice = InstalledVoices.First().Name;
             DefaultVoice = Config.DefaultVoice;
+            InstalledVoices.ForEach(iv =>
+            {
+                var cfg = Config.VoiceConfig.FirstOrDefault(v => v.Matches(iv.Name));
+                if (cfg == null)
+                {
+                    cfg = new VoiceConfig() { VoiceName = iv.Name, Volume = 100 };
+                    Config.VoiceConfig.Add(cfg);
+                    SaveConfig();
+                }
+            });
             SaveConfig();
             ChatCommands["!stimmen"] = (speaker, atext) =>
             {
                 StringBuilder sb = new StringBuilder();
-                InstalledVoices.ForEach(iv => sb.Append($"'{iv.Name}',"));
+                Config.VoiceConfig.ForEach(cfg => sb.Append($"'{cfg.VoiceAlias}',"));
                 tts.SendTaggedMsg(speaker.Name, "Verfügbare Stimmen: " + sb);
             };
 
@@ -171,6 +209,9 @@ namespace TwitchTTS
             ChatCommands["!test"] = OnChatCommandsModTest;
             ChatCommands["!setvolume"] = OnChatCommandsModSetVolume;
             ChatCommands["!default"] = OnChatCommandsModSetDefaultVoice;
+            ChatCommands["!alias"] = OnChatCommandsModSetAlias;
+            ChatCommands["!replace"] = OnChatCommandsModSetReplace;
+            ChatCommands["!prefix"] = OnChatCommandsModSetPrefix;
             //ChatCommands
             ChatCommands["!ttshelp"] = OnChatCommandTTSHelp;
 
@@ -180,16 +221,23 @@ namespace TwitchTTS
 
             tts.Start();
             SpeakText("Twitch T T S gestartet. Möge der Saft mit Dir sein!");
-           
+
             Console.WriteLine("Press enter to exit....");
-            Console.ReadLine();
+            string cCmd;
+            while ((cCmd = Console.ReadLine()) != null)
+            {
+                if (cCmd == "quit")
+                    return;
+                OnMessageReceived(Config.ChannelName, cCmd, "mod=1", true);
+            }
 
         }
 
+
         private static int GetVoiceVolume(string targetName)
         {
-            var t =Config.VoiceConfig.FirstOrDefault(v => v.VoiceName.CompareNoCase(targetName));
-            return Math.Min(100,(t != null) ? t.Volume : 100);
+            var t = Config.VoiceConfig.FirstOrDefault(v => v.Matches(targetName));
+            return Math.Min(100, (t != null) ? t.Volume : 100);
         }
 
         private static void OnChatCommandTTSHelp(SpeakerConfig speaker, string args)
@@ -207,10 +255,10 @@ namespace TwitchTTS
         {
             if (!IsMod(speaker))
                 return;
-            var targetVolume = Math.Min(100,Convert.ToInt32(args.GetPart(0, " ")));
+            var targetVolume = Math.Min(100, Convert.ToInt32(args.GetPart(0, " ")));
             var targetName = args.SkipParts(0, 1, " ");
 
-            var t = Config.VoiceConfig.FirstOrDefault(v => v.VoiceName.CompareNoCase(targetName));
+            var t = Config.VoiceConfig.FirstOrDefault(v => v.Matches(targetName));
             if (t == null)
             {
                 Config.VoiceConfig.Add(new VoiceConfig() { VoiceName = targetName, Volume = targetVolume });
@@ -234,6 +282,46 @@ namespace TwitchTTS
             tts.SendTaggedMsg(speaker.Name, $"Standardstimme  auf '{args}' eingestellt.");
         }
 
+        private static void OnChatCommandsModSetAlias(SpeakerConfig speaker, string args)
+        {
+            if (!IsMod(speaker))
+                return;
+            var targetName = args.GetPart(0, "=").Trim();
+            var targetNewName = args.SkipParts(0, 1, "=").Trim();
+
+
+            var t = Config.VoiceConfig.FirstOrDefault(v => v.Matches(targetName));
+            if (t == null)
+            {
+                tts.SendTaggedMsg(speaker.Name, $"Stimme '{targetName}' nicht gefunden.");
+            }
+            else
+            {
+                t.VoiceAlias = targetNewName;
+            }
+            SaveConfig();
+            tts.SendTaggedMsg(speaker.Name, $"Alias für '{targetName}' auf '{targetNewName}' eingestellt.");
+        }
+        private static void OnChatCommandsModSetReplace(SpeakerConfig speaker, string args)
+        {
+            if (!IsMod(speaker))
+                return;
+            var targetName = args.GetPart(0, "=").Trim();
+            var targetNewName = args.SkipParts(0, 1, "=").Trim();
+
+
+            var t = Config.VoiceReplaces.FirstOrDefault(vr => String.Compare(vr.Match, targetName, true) == 0);
+            if (t == null)
+            {
+                Config.VoiceReplaces.Add(new VoiceReplace() { Match = targetName, ReplaceWith = targetNewName });
+            }
+            else
+            {
+                t.ReplaceWith = targetNewName;
+            }
+            SaveConfig();
+            tts.SendTaggedMsg(speaker.Name, $"Done");
+        }
         private static void OnChatCommandsModSetVoice(SpeakerConfig speaker, string args)
         {
             if (!IsMod(speaker))
@@ -245,6 +333,19 @@ namespace TwitchTTS
             SpeakerConfigurations[targetConfig.Name] = targetConfig;
             SaveConfig();
             tts.SendTaggedMsg(speaker.Name, $"Stimme für '{targetName}' auf '{targetNewName}' eingestellt.");
+        }
+
+        private static void OnChatCommandsModSetPrefix(SpeakerConfig speaker, string args)
+        {
+            if (!IsMod(speaker))
+                return;
+            var targetName = args.GetPart(0, " ");
+            var targetNewName = args.SkipParts(0, 1, " ");
+            var targetConfig = TransformSender(targetName, null);
+            targetConfig.SpokenPrefix = targetNewName;
+            SpeakerConfigurations[targetConfig.Name] = targetConfig;
+            SaveConfig();
+            tts.SendTaggedMsg(speaker.Name, $"Prefix für '{targetName}' auf '{targetNewName}' eingestellt.");
         }
 
         private static void OnChatCommandsModSetName(SpeakerConfig speaker, string args)
@@ -283,7 +384,7 @@ namespace TwitchTTS
         {
             if (!IsMod(speaker))
                 return;
-            var targetConfig = TransformSender(args,null);
+            var targetConfig = TransformSender(args, null);
             targetConfig.DoSpeak = false;
             SpeakerConfigurations[args] = targetConfig;
             SaveConfig();
@@ -318,20 +419,20 @@ namespace TwitchTTS
         {
             if (!IsSubscriber(speaker))
                 return;
-
-            if ((!String.IsNullOrEmpty(args)) && (InstalledVoices.FirstOrDefault(iv => iv.Name.CompareNoCase(args)) != null))
+            var cfg = Config.VoiceConfig.FirstOrDefault(v => v.Matches(args));
+            if ((!String.IsNullOrEmpty(args)) && (InstalledVoices.FirstOrDefault(iv => iv.Name.CompareNoCase(cfg.VoiceName)) != null))
             {
                 speaker.Voice = args;
                 SpeakerConfigurations[speaker.Name] = speaker;
                 SaveConfig();
-                tts.SendTaggedMsg(speaker.Name,"Stimme eingestellt.");
+                tts.SendTaggedMsg(speaker.Name, "Stimme eingestellt.");
             }
             else
             {
                 tts.SendTaggedMsg(speaker.Name, "Unbekannte Stimme.");
             }
 
-                
+
         }
 
         public static T FromXml<T>(string xml)
@@ -353,9 +454,9 @@ namespace TwitchTTS
             XmlWriterSettings w = new XmlWriterSettings() { Indent = true, Encoding = Encoding.UTF8, OmitXmlDeclaration = true };
             using (var sww = new StringWriter())
             {
-                using (XmlWriter writer = XmlWriter.Create(sww,w))
+                using (XmlWriter writer = XmlWriter.Create(sww, w))
                 {
-                    xsSubmit.Serialize(writer,o);
+                    xsSubmit.Serialize(writer, o);
                 }
                 File.WriteAllText(filename, sww.ToString());
             }
@@ -375,8 +476,8 @@ namespace TwitchTTS
         static void SaveConfig()
         {
             var tmpSpeakers = new SpeakerConfigList(SpeakerConfigurations.Values.ToList());
-            SaveObject(tmpSpeakers,GetFilename("config/speakers.xml"));
-            SaveObject(Config,GetFilename("config/config.xml"));
+            SaveObject(tmpSpeakers, GetFilename("config/speakers.xml"));
+            SaveObject(Config, GetFilename("config/config.xml"));
             logger.Info("Configuration saved.");
 
         }
@@ -390,7 +491,7 @@ namespace TwitchTTS
         {
             SpeakerConfig value = null;
             if (!SpeakerConfigurations.TryGetValue(orgSender, out value))
-                value = new SpeakerConfig() { Name = orgSender, SpokenName = orgSender, Voice = DefaultVoice};
+                value = new SpeakerConfig() { Name = orgSender, SpokenName = orgSender, Voice = DefaultVoice };
             if (msgTags != null)
             {
                 if (msgTags.TryGetValue("mod", out string sIsMod))
@@ -401,12 +502,16 @@ namespace TwitchTTS
             return value;
         }
 
-        static bool OnMessageReceived(string msg)
-        {
-            var msgText = msg.GetPart(1, "PRIVMSG #"+Config.ChannelName+" :");
-            var msgSender = msg.GetPart(1, " :").GetPart(0,"!");
-            var msgTagsTxt = msg.GetPart(0, " :");
 
+        private static void Speaker_StateChanged(object sender, StateChangedEventArgs e)
+        {
+            if (e.State == SynthesizerState.Ready && e.PreviousState == SynthesizerState.Speaking && TextToSpeak.TryDequeue(out var tts))
+                SpeakText(tts.Text, tts.Voice);
+        }
+
+
+        static bool OnMessageReceived(string msgSender, string msgText, string msgTagsTxt, bool isConsole = false)
+        {
             var allTagTexts = msgTagsTxt.Split(';').ToList();
             var allTags = new Dictionary<string, string>(StringComparer.InvariantCultureIgnoreCase);
             allTagTexts.ForEach(t => allTags[t.GetPart(0, "=")] = t.GetPart(1, "="));
@@ -417,12 +522,12 @@ namespace TwitchTTS
                 return true;
 
             var speakerConfig = TransformSender(msgSender, allTags);
-            
+
             if (msgText[0] == '!')
             {
                 var msgCommand = msgText.GetPart(0, " ");
                 var msgArgs = msgText.SkipParts(0, 1, " ");
-                if (ChatCommands.TryGetValue(msgCommand,out Action<SpeakerConfig,string> act))
+                if (ChatCommands.TryGetValue(msgCommand, out Action<SpeakerConfig, string> act))
                 {
                     act(speakerConfig, msgArgs);
                 }
@@ -431,29 +536,54 @@ namespace TwitchTTS
             if (!IsTTSEnabled)
                 return true;
 
-            if (speaker.State == SynthesizerState.Speaking)
-            {
-                logger.Warn("Speaker busy. skipping.");
-                return false;
-            }
-            
             if (!speakerConfig.DoSpeak)
             {
                 logger.Info($"{msgSender} blocked.");
                 return true;
             }
-            msgText = ParseText(speakerConfig.SpokenName, msgText);
-           
+            msgText = ParseText(speakerConfig, msgText);
+
             logger.Debug(msgText);
             SpeakText(msgText, speakerConfig.Voice);
             return true;
         }
 
-        private static string ParseText(string sender, string text)
+        static bool OnMessageReceived(string msg)
         {
+            var msgText = msg.GetPart(1, "PRIVMSG #" + Config.ChannelName + " :");
+            var msgSender = msg.GetPart(1, " :").GetPart(0, "!");
+            var msgTagsTxt = msg.GetPart(0, " :");
+            return OnMessageReceived(msgSender, msgText, msgTagsTxt);
+
+
+        }
+
+        static string lastSpeaker = String.Empty;
+        static DateTime lastSpeak = DateTime.MinValue;
+
+        private static string ParseText(SpeakerConfig sender, string text)
+        {
+            string prefix = sender.SpokenName + GetVoicePrefix(sender);
             if (text.ToLowerInvariant().Contains("http:") || text.ToLowerInvariant().Contains("https:"))
                 text = "Irgendwas mit einem Link drin";
-            return sender + " sagt " + text;
+            else
+                Config.VoiceReplaces.ForEach(vr => text = Regex.Replace(text, vr.Match, vr.ReplaceWith, RegexOptions.IgnoreCase));
+            if (sender.Name == lastSpeaker && (DateTime.Now - lastSpeak < TimeSpan.FromSeconds(2)))
+                prefix = "";
+            lastSpeaker = sender.Name;
+            lastSpeak = DateTime.Now;
+            return prefix + text;
+        }
+
+        private static string GetVoicePrefix(SpeakerConfig sender)
+        {
+            var tmp = GetVoiceConfig(sender?.Voice).VoicePrefix;
+            if (!String.IsNullOrEmpty(sender.SpokenPrefix))
+                tmp = sender.SpokenPrefix;
+            if (String.IsNullOrEmpty(tmp))
+                return "";
+            return " " + tmp + " ";
+
         }
     }
 }

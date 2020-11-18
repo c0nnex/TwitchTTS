@@ -17,6 +17,9 @@ namespace TwitchTTS
         public string SpokenName { get; set; }
 
         [XmlAttribute]
+        public string SpokenPrefix { get; set; } = null;
+
+        [XmlAttribute]
         public string Voice { get; set; }
 
         [XmlAttribute]

@@ -22,8 +22,24 @@ namespace TwitchTTS
     {
         [XmlAttribute] 
         public string VoiceName { get; set; }
+
+        [XmlAttribute]
+        public string VoicePrefix { get; set; } = "sagt";
+
+        [XmlAttribute(AttributeName = "Alias")]
+        public string _VoiceAlias { get; set; }
+        
         [XmlAttribute] 
         public int Volume { get; set; } = 100;
+
+
+        [XmlIgnore]
+        public string VoiceAlias { get => !String.IsNullOrEmpty(_VoiceAlias) ? _VoiceAlias : VoiceName; set => _VoiceAlias = value; }
+
+        public bool Matches(string what)
+        {
+            return String.Compare(VoiceName, what, true) == 0 || String.Compare(VoiceAlias, what, true) == 0;
+        }
     }
 
     public class VoiceReplace
