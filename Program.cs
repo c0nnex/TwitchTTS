@@ -240,6 +240,7 @@ namespace TwitchTTS
 
         private static void Tts_ConnectionStatusChanged(object sender, TwitchIRCStatus e)
         {
+            logger.Info("Connectionstatus " + e);
             switch (e)
             {
                 case TwitchIRCStatus.Offline:
