@@ -7,3 +7,4 @@
 /obj/Debug
 /packages/NLog.4.7.0
 *.user
+/Release

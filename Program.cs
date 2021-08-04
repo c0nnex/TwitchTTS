@@ -122,13 +122,17 @@ namespace TwitchTTS
                 var cfg = GetVoiceConfig(speakerVoice);
                 speaker.SelectVoice(cfg.VoiceName);
                 speaker.Volume = cfg.Volume;
+                logger.Trace("Speak: " + text);
+                speaker.SpeakAsync(text);
             }
             catch (ArgumentException aex)
             {
                 logger.Warn($"Text2Speech: Cannot set voice to '{speakerVoice}': {aex.Message}");
             }
-            logger.Trace("Speak: " + text);
-            speaker.SpeakAsync(text);
+            catch (Exception ex)
+            {
+                logger.Warn(ex.ToString());
+            }
         }
         #endregion
 
@@ -166,6 +170,8 @@ namespace TwitchTTS
 
         static void Main(string[] args)
         {
+           
+
             LogFactory = ConfigureLogging("twitchtts");
             logger = LogFactory.GetLogger("main");
 
@@ -218,9 +224,8 @@ namespace TwitchTTS
             tts = new TwitchIRC(Config.NickName, Config.ChannelName, Config.OauthToken);
             tts.MessageReceived = OnMessageReceived;
             tts.IsSpeakerBusy = IsSpeakerBusy;
-
+            tts.ConnectionStatusChanged += Tts_ConnectionStatusChanged;
             tts.Start();
-            SpeakText("Twitch T T S gestartet. Möge der Saft mit Dir sein!");
 
             Console.WriteLine("!help for command, 'quit' to exit ...");
             string cCmd;
@@ -233,6 +238,29 @@ namespace TwitchTTS
 
         }
 
+        private static void Tts_ConnectionStatusChanged(object sender, TwitchIRCStatus e)
+        {
+            switch (e)
+            {
+                case TwitchIRCStatus.Offline:
+                    break;
+                case TwitchIRCStatus.Connecting:
+                    break;
+                case TwitchIRCStatus.WaitingForAck:
+                    break;
+                case TwitchIRCStatus.ConnectionFailed:
+                    SpeakText("Twitch T T S Keine Verbindung zum Chat!");
+                    break;
+                case TwitchIRCStatus.Timeout:
+                    SpeakText("Twitch T T S Chat Timeout!");
+                    break;
+                case TwitchIRCStatus.Online:
+                    SpeakText("Twitch T T S online. Möge der Saft mit Dir sein!");
+                    break;
+                default:
+                    break;
+            }
+        }
 
         private static int GetVoiceVolume(string targetName)
         {
@@ -566,11 +594,16 @@ namespace TwitchTTS
 
         private static string ParseText(SpeakerConfig sender, string text)
         {
+            text = StripUTF8(text);
             string prefix = sender.SpokenName + GetVoicePrefix(sender);
             if (text.ToLowerInvariant().Contains("http:") || text.ToLowerInvariant().Contains("https:"))
                 text = "Irgendwas mit einem Link drin";
             else
+            {
                 Config.VoiceReplaces.ForEach(vr => text = Regex.Replace(text, vr.Match, vr.ReplaceWith, RegexOptions.IgnoreCase));
+                var sL = SpeakerConfigurations.Values.ToList();
+                sL.ForEach(sc => text = Regex.Replace(text, sc.Name, sc.SpokenName, RegexOptions.IgnoreCase));
+            }
             if (sender.Name == lastSpeaker && (DateTime.Now - lastSpeak < TimeSpan.FromSeconds(2)))
                 prefix = "";
             lastSpeaker = sender.Name;
@@ -587,6 +620,21 @@ namespace TwitchTTS
                 return "";
             return " " + tmp + " ";
 
+        }
+
+        private static string StripUTF8(string inputString)
+        {
+            return  Encoding.ASCII.GetString(
+                Encoding.Convert(
+                    Encoding.UTF8,
+                    Encoding.GetEncoding(
+                        Encoding.ASCII.EncodingName,
+                        new EncoderReplacementFallback(string.Empty),
+                        new DecoderExceptionFallback()
+                        ),
+                    Encoding.UTF8.GetBytes(inputString)
+                )
+            );
         }
     }
 }
