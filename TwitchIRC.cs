@@ -12,6 +12,15 @@ using System.Threading.Tasks;
 
 namespace TwitchTTS
 {
+    enum TwitchIRCStatus
+    {
+        Offline,
+        Connecting,
+        WaitingForAck,
+        ConnectionFailed,
+        Timeout,
+        Online
+    }
 
     class TwitchIRC 
     {
@@ -32,13 +41,25 @@ namespace TwitchTTS
         public Func<string,bool> MessageReceived = (m) => true;
         public Func<bool> IsSpeakerBusy = () => false;
 
+        public event EventHandler<TwitchIRCStatus> ConnectionStatusChanged;
+
         TcpClient networkSocket;
+        private TwitchIRCStatus currentStatus = TwitchIRCStatus.Offline;
         private NetworkStream networkStream;
         private StreamReader inputStream;
         private StreamWriter outputStream;
         private DateTime lastCommand = new DateTime();
         private static TimeSpan commandThrottleTimeSpan = TimeSpan.FromMilliseconds(1750);
         private CancellationTokenSource CancellationTokenSource = new CancellationTokenSource();
+
+        internal TwitchIRCStatus CurrentStatus
+        {
+            get => currentStatus; set
+            {
+                currentStatus = value;
+                ConnectionStatusChanged?.Invoke(this, value);
+            }
+        }
 
         public TwitchIRC(string nickname, string channelname, string oauthtoken)
         {
@@ -51,6 +72,7 @@ namespace TwitchTTS
         public void Start()
         {
             logger.Info("Connecting...");
+            CurrentStatus = TwitchIRCStatus.Connecting;
             networkSocket = new System.Net.Sockets.TcpClient();
 
             networkSocket.Connect(server, port);
@@ -61,7 +83,7 @@ namespace TwitchTTS
             }
 
             logger.Info("Connected!");
-
+            CurrentStatus = TwitchIRCStatus.WaitingForAck;
             networkStream = networkSocket.GetStream();
             inputStream = new System.IO.StreamReader(networkStream);
             outputStream = new System.IO.StreamWriter(networkStream);
@@ -107,8 +129,8 @@ namespace TwitchTTS
             commandQueue.Enqueue("PRIVMSG #" + channelName + " :@" + tagWho + " " + msg);
         }
 
-        
-        
+
+        private DateTime LastPing = DateTime.Now;
         public void BackgroundProcessingDoWork(object argument)
         {
             CancellationToken token = (CancellationToken)argument;
@@ -128,6 +150,7 @@ namespace TwitchTTS
                     //Send pong reply to any ping messages
                     if (buffer.StartsWith("PING "))
                     {
+                        LastPing = DateTime.Now;
                         SendCommand(buffer.Replace("PING", "PONG"));
                     }
 
@@ -136,10 +159,19 @@ namespace TwitchTTS
                     {
 
                         SendCommand("JOIN #" + channelName);
-
+                        CurrentStatus = TwitchIRCStatus.Online;
                     }
                 }
-
+                if (DateTime.Now - LastPing > TimeSpan.FromMinutes(8))
+                {
+                    CurrentStatus = TwitchIRCStatus.Timeout;
+                    break;
+                }
+                if (CurrentStatus == TwitchIRCStatus.WaitingForAck && DateTime.Now - LastPing > TimeSpan.FromSeconds(15))
+                {
+                    CurrentStatus = TwitchIRCStatus.ConnectionFailed;
+                    break;
+                }
                 if (!receivedMsgs.IsEmpty && !IsSpeakerBusy())
                 {
                     while (receivedMsgs.TryDequeue(out string msg))
